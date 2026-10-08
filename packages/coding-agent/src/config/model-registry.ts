@@ -731,10 +731,10 @@ export class ModelRegistry {
 						discoveryConfig.discovery.timeoutMs,
 					);
 		if (runtimeMetadata === undefined) {
-			return this.find(model.provider, model.id) ?? model;
+			return this.getModelMetadata(model) ?? model;
 		}
 		const { contextWindow, maxTokens, input } = runtimeMetadata;
-		const current = this.find(model.provider, model.id) ?? model;
+		const current = this.getModelMetadata(model) ?? model;
 		const override = this.#resolveLiveModelOverride(current);
 		const customModel = this.#resolveLiveCustomModelOverlay(current);
 		const patch: ModelPatch = {};

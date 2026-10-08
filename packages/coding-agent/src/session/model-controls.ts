@@ -144,6 +144,11 @@ export class ModelControls {
 		return this.#autoResolvedLevel;
 	}
 
+	/** Whether a scope is configured, including one with no eligible models. */
+	get scopedModelsConfigured(): boolean {
+		return this.#scopedModelsConfigured;
+	}
+
 	/** Models scoped to cycling, minus disabled providers and excluded models. */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
 		const disabledProviders = cfgDisabledProviders.get(this.#host.settings);
@@ -317,7 +322,7 @@ export class ModelControls {
 	 * Cycle to next/previous model.
 	 * Uses the configured scope, even when empty; otherwise all available models.
 	 * @param direction - "forward" (default) or "backward"
-	 * @returns The new model info, or undefined if only one model available
+	 * @returns The new model info, or undefined if no eligible model change is available
 	 */
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
 		// An empty filtered scope is still a scope, never permission to cycle globally.
@@ -444,9 +449,10 @@ export class ModelControls {
 	async #cycleScopedModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		const scopedModels = await this.#getScopedModelsWithApiKey();
-		if (scopedModels.length <= 1) return undefined;
+		if (scopedModels.length === 0) return undefined;
 
 		const currentModel = this.#model;
+		if (scopedModels.length === 1 && modelsAreEqual(scopedModels[0].model, currentModel)) return undefined;
 		let currentIndex = scopedModels.findIndex(sm => modelsAreEqual(sm.model, currentModel));
 
 		if (currentIndex === -1) currentIndex = 0;

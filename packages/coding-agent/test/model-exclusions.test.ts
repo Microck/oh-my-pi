@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { cfgEnabledModels, cfgExcludedModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
@@ -16,9 +17,18 @@ import {
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { ModelMentionRegistry } from "@oh-my-pi/pi-coding-agent/session/model-mentions";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { createModelBrowserSource } from "@oh-my-pi/pi-coding-agent/modes/model-browser-source";
+import type { TUI } from "@oh-my-pi/pi-tui";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
+import { buildSessionModelScope, SessionModelScopeCache } from "@oh-my-pi/pi-tui/overlays/model-browser";
+import { ModelHubComponent } from "@oh-my-pi/pi-tui/overlays/model-hub";
+import { ModelPickerComponent } from "@oh-my-pi/pi-tui/overlays/model-picker";
+import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { AgentSideConnection, type AnyMessage } from "@oh-my-pi/pi-utils/acp";
 
@@ -45,6 +55,10 @@ describe("excludedModels catalog policy", () => {
 	let registry: ModelRegistry;
 	let session: AgentSession | undefined;
 	let acp: AcpAgent | undefined;
+
+	beforeAll(async () => {
+		await initTheme(false);
+	});
 
 	beforeEach(async () => {
 		directory = TempDir.createSync("@omp-model-exclusions-");
@@ -258,6 +272,136 @@ describe("excludedModels catalog policy", () => {
 			cfgEnabledModels.set(settings, []);
 			await Bun.sleep(0);
 			expect((await live.cycleModel())?.isScoped).toBe(false);
+		}
+	});
+
+	it.each(["forward", "backward"] as const)("cycles %s to the sole eligible scoped model", async direction => {
+		const live = startSession();
+		live.setScopedModels(live.scopedModels.filter(entry => entry.model.id.startsWith("regular-test")));
+		cfgExcludedModels.set(settings, ["devin/regular-test"]);
+		expect((await live.cycleModel(direction))?.model.id).toBe("regular-test-v2");
+		expect(await live.cycleModel(direction)).toBeUndefined();
+	});
+
+	it("keeps configured-empty picker, hub, and mention scopes empty until the scope is cleared", async () => {
+		const live = startSession();
+		live.setScopedModels([], true);
+		const mentionRegistry = new ModelMentionRegistry({
+			sessionManager: live.sessionManager,
+			modelRegistry: registry,
+			scopedModels: () => live.scopedModels.map(entry => entry.model),
+			scopedModelsConfigured: () => live.scopedModelsConfigured,
+		});
+		expect(mentionRegistry.findMentionable("devin/regular-test")).toBeUndefined();
+		const source = createModelBrowserSource(settings);
+		const cache = new SessionModelScopeCache(source, registry);
+		const mentions = createModelMentionSource({
+			source,
+			registry,
+			scopedModels: () => live.scopedModels.map(entry => entry.model),
+			scopedModelsConfigured: () => live.scopedModelsConfigured,
+		});
+		expect(buildSessionModelScope(source, registry, [], live.scopedModelsConfigured).items).toEqual([]);
+		expect(cache.get([], live.scopedModelsConfigured).items).toEqual([]);
+		expect(mentions("devin")).toEqual([]);
+		// A small terminal substitute lets the real overlays describe and handle selection.
+		const tui = { requestRender: () => {}, terminal: { rows: 30 } } as unknown as TUI;
+		const cx: DescribeContext = {
+			cols: 120,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		let picked: Model | undefined;
+		const picker = new ModelPickerComponent(
+			tui,
+			source,
+			registry,
+			[],
+			{
+				onPick: model => {
+					picked = model;
+				},
+				onCancel: () => {},
+			},
+			{ scopedModelsConfigured: live.scopedModelsConfigured },
+		);
+		const pickerNode = picker.describe(cx);
+		if (pickerNode.k !== "picker") throw new Error("Expected a picker node");
+		expect(pickerNode.p?.total).toBe(0);
+		picker.handleInput("\r");
+		expect(picked).toBeUndefined();
+		const hub = new ModelHubComponent(
+			tui,
+			source,
+			registry,
+			[],
+			{
+				onAssign: model => {
+					picked = model;
+				},
+				onUnassign: () => {},
+				onCancel: () => {},
+			},
+			{ scopedModelsConfigured: live.scopedModelsConfigured },
+		);
+		try {
+			const chatSelectors = new Set(
+				selectors(registry.getAvailable("all").filter(model => modelKind(model) === "chat")),
+			);
+			const hubNode = hub.describe(cx);
+			if (hubNode.k !== "picker") throw new Error("Expected a hub picker node");
+			const items = hubNode.p?.items;
+			if (!items) throw new Error("Hub did not describe its model items");
+			expect(items.filter(item => chatSelectors.has(item.id))).toEqual([]);
+		} finally {
+			hub.dispose();
+		}
+		live.setScopedModels([], false);
+		expect(mentionRegistry.findMentionable("devin/regular-test")?.id).toBe("regular-test");
+		expect(cache.get([], live.scopedModelsConfigured).items.map(item => item.selector)).toContain(
+			"devin/regular-test",
+		);
+		expect(mentions("regular-test").map(item => item.selector)).toContain("devin/regular-test");
+		expect(buildSessionModelScope(source, registry, []).items.length).toBeGreaterThan(0);
+	});
+
+	it("rebinds an excluded active model after background discovery", async () => {
+		const model = registry.find("devin", "regular-test");
+		if (!model) throw new Error("Missing fixture");
+		cfgExcludedModels.set(settings, ["devin/regular-test"]);
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: { ...model, contextWindow: 256_000 },
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: registry,
+			rebindModelAfterDiscovery: true,
+		});
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "model_changed") resolve();
+		});
+		registry.refreshInBackground("offline");
+		try {
+			await Promise.race([
+				promise,
+				Bun.sleep(5_000).then(() => {
+					throw new Error("Discovery did not rebind active model");
+				}),
+			]);
+			expect(session.model?.contextWindow).toBe(128_000);
+			expect(session.model?.id).toBe("regular-test");
+			expect(registry.find("devin", "regular-test")).toBeUndefined();
+		} finally {
+			unsubscribe();
 		}
 	});
 
