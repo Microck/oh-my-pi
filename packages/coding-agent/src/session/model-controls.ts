@@ -456,11 +456,15 @@ export class ModelControls {
 
 		const currentModel = this.#model;
 		if (scopedModels.length === 1 && modelsAreEqual(scopedModels[0].model, currentModel)) return undefined;
-		let currentIndex = scopedModels.findIndex(sm => modelsAreEqual(sm.model, currentModel));
-
-		if (currentIndex === -1) currentIndex = 0;
+		const currentIndex = scopedModels.findIndex(sm => modelsAreEqual(sm.model, currentModel));
 		const len = scopedModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
+		let nextIndex: number;
+		if (currentIndex === -1) {
+			// An excluded active model sits outside the visible cycle; enter at the nearest end.
+			nextIndex = direction === "forward" ? 0 : len - 1;
+		} else {
+			nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
+		}
 		const next = scopedModels[nextIndex];
 
 		// Apply model

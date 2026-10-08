@@ -4,6 +4,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { applyModelPreset, saveModelPreset } from "@oh-my-pi/pi-coding-agent/config/model-presets";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { cfgEnabledModels, cfgExcludedModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -283,6 +284,34 @@ describe("excludedModels catalog policy", () => {
 		expect(await live.cycleModel(direction)).toBeUndefined();
 	});
 
+	it.each(["forward", "backward"] as const)(
+		"enters the visible scope at its %s end when the active model is excluded",
+		async direction => {
+			const live = startSession();
+			cfgExcludedModels.set(settings, ["devin/regular-test"]);
+			const eligible = live.scopedModels;
+			expect(eligible).toHaveLength(2);
+			const expected = direction === "forward" ? eligible[0].model : eligible[eligible.length - 1].model;
+			expect((await live.cycleModel(direction))?.model.id).toBe(expected.id);
+		},
+	);
+
+	it("refuses presets outside a configured-empty scope without writing roles", async () => {
+		settings.setModelRole("default", "devin/fusion-test");
+		saveModelPreset(settings, "outside");
+		settings.setModelRole("default", "devin/regular-test");
+		const live = startSession();
+		live.setScopedModels(live.scopedModels.filter(entry => entry.model.id.startsWith("regular-test")));
+		cfgExcludedModels.set(settings, ["devin/regular-test*"]);
+		expect(live.scopedModels).toEqual([]);
+		expect((await applyModelPreset(settings, live, "outside")).kind).toBe("unavailable");
+		expect(settings.getModelRole("default")).toBe("devin/regular-test");
+		expect(live.model?.id).toBe("regular-test");
+		live.setScopedModels([], false);
+		expect((await applyModelPreset(settings, live, "outside")).kind).toBe("switched");
+		expect(live.model?.id).toBe("fusion-test");
+	});
+
 	it("keeps interactive role cycling and quick-role choices inside the configured scope", async () => {
 		const live = startSession();
 		const scope = live.scopedModels.filter(entry => entry.model.id.startsWith("regular-test"));
@@ -535,11 +564,26 @@ describe("excludedModels catalog policy", () => {
 	});
 
 	it.each([
-		"devin/fusion-[tv]*",
-		"devin/fusion-{test,test-v2}",
-		"devin/{fusion-{test,test-v2},regular-test}",
-		"devin/fusion-\\[test",
-	])("accepts complete glob %s", pattern => {
-		expect(() => cfgExcludedModels.set(settings, [pattern])).not.toThrow();
+		["devin/fusion-[tv]*", ["fusion-test", "fusion-test-v2"]],
+		["devin/fusion-{test,test-v2}", ["fusion-test", "fusion-test-v2"]],
+		["devin/{fusion-{test,test-v2},regular-test}", ["fusion-test", "fusion-test-v2", "regular-test"]],
+		["devin/fusion-\\[test", ["fusion-[test"]],
+	] as const)("excludes matching catalog entries for complete glob %s", (pattern, excluded) => {
+		const ids = ["fusion-test", "fusion-test-v2", "fusion-[test", "regular-test", "regular-test-v2"];
+		registry.registerProvider("devin", {
+			baseUrl: "https://example.invalid/v1",
+			api: "openai-completions",
+			apiKey: "fixture-key",
+			models: ids.map(modelDefinition),
+		});
+		const original = registry.getAvailableForProviders(new Set(["devin"])).map(model => model.id);
+		cfgExcludedModels.set(settings, [pattern]);
+		expect(
+			registry
+				.getAvailableForProviders(new Set(["devin"]))
+				.map(model => model.id)
+				.sort(),
+		).toEqual(original.filter(id => !excluded.some(excludedId => excludedId === id)).sort());
+		expect(selectors(registry.getAvailable())).toContain("other/fusion-test");
 	});
 });

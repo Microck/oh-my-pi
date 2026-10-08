@@ -517,6 +517,7 @@ export class SelectorController {
 					return command ? openInEditor(command, text) : Promise.resolve(null);
 				},
 				scopedModels: this.ctx.session.scopedModels,
+				scopedModelsConfigured: this.ctx.session.scopedModelsConfigured,
 				availableToolNames: this.ctx.session.getAdvisorAvailableToolNames(),
 				syncBacklog: cfgAdvisorSyncBacklog.get(this.ctx.settings),
 				defaultModelLabel: defaultAdvisorModel
