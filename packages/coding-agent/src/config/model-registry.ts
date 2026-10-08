@@ -135,9 +135,9 @@ import {
 	validateProviderConfiguration,
 } from "./models-config";
 import type { ModelOverride, ModelsConfig, ProviderAuthMode } from "./models-config-schema";
-import { type Settings, settings } from "./settings";
+import { isSettingsInitialized, type Settings, settings } from "./settings";
 
-import { cfgDisabledProviders } from "./model-settings";
+import { cfgDisabledProviders, cfgModelExclusionFilter } from "./model-settings";
 import { cfgExtendedContext } from "../session/context-settings";
 
 // DeviceCheck attestation (`x-oai-attestation`) for ChatGPT-OAuth Codex
@@ -2735,17 +2735,24 @@ export class ModelRegistry {
 	 */
 	getAll(kind: ModelKind | "all" = "chat"): Model<Api>[] {
 		const models = this.#ensureFullSnapshot();
-		if (kind === "all") return models;
+		if (kind === "all") return this.#filterExcludedModels(models);
 		let snapshots = this.#fullKindSnapshots.get(models);
 		if (!snapshots) {
 			snapshots = {};
 			this.#fullKindSnapshots.set(models, snapshots);
 		}
 		const cached = snapshots[kind];
-		if (cached) return cached;
+		if (cached) return this.#filterExcludedModels(cached);
 		const filtered = models.filter(model => modelKind(model) === kind);
 		snapshots[kind] = filtered;
-		return filtered;
+		return this.#filterExcludedModels(filtered);
+	}
+
+	/** Filter only catalog reads; discovery inputs and provider metadata stay intact. */
+	#filterExcludedModels(models: Model<Api>[]): Model<Api>[] {
+		if (!this.#settings && !isSettingsInitialized()) return models;
+		const include = cfgModelExclusionFilter.get(this.#settings ?? settings);
+		return include ? models.filter(include) : models;
 	}
 
 	/**
@@ -2787,11 +2794,13 @@ export class ModelRegistry {
 		const requested = new Set([...providers].map(provider => provider.trim().toLowerCase()).filter(Boolean));
 		const isProviderAvailable = this.#createProviderAvailabilityCheck();
 		if (this.#hasFullSnapshot) {
-			return this.#models.filter(
-				model =>
-					requested.has(model.provider.toLowerCase()) &&
-					isProviderAvailable(model.provider) &&
-					(kind === "all" || modelKind(model) === kind),
+			return this.#filterExcludedModels(
+				this.#models.filter(
+					model =>
+						requested.has(model.provider.toLowerCase()) &&
+						isProviderAvailable(model.provider) &&
+						(kind === "all" || modelKind(model) === kind),
+				),
 			);
 		}
 		const availableProviders = new Set(
@@ -2800,7 +2809,7 @@ export class ModelRegistry {
 			),
 		);
 		const models = this.#composeStaticModels(availableProviders);
-		return kind === "all" ? models : models.filter(model => modelKind(model) === kind);
+		return this.#filterExcludedModels(kind === "all" ? models : models.filter(model => modelKind(model) === kind));
 	}
 
 	/**
@@ -2927,14 +2936,15 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Find a model by provider and ID. A provider disabled in settings has no
+	 * Find a model by provider and ID, respecting model exclusions.
+	 * A provider disabled in settings has no
 	 * models to find: every caller that falls back to a literal lookup when
 	 * availability-filtered resolution misses (retry fallback candidates,
 	 * advisors, restored and CLI models) would otherwise reach it anyway.
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
+		return resolveProviderModelReference(provider, modelId, this.getProviderModels(provider));
 	}
 
 	/** Whether settings disable `provider` (`disabledProviders`). */
@@ -2943,15 +2953,15 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * One provider's full catalog (every kind, credentials ignored) without
+	 * One provider's catalog (every kind, credentials ignored, exclusions applied) without
 	 * materializing the whole bundled catalog. Startup validation of
 	 * provider-qualified selectors uses this: `getAll()` composes ~5k models
 	 * through the compat classifier, which costs ~80ms on the first paint path.
 	 */
 	getProviderModels(provider: string): Model<Api>[] {
 		const normalizedProvider = provider.trim().toLowerCase();
-		return this.#modelsForProviderLookup(provider).filter(
-			model => model.provider.toLowerCase() === normalizedProvider,
+		return this.#filterExcludedModels(
+			this.#modelsForProviderLookup(provider).filter(model => model.provider.toLowerCase() === normalizedProvider),
 		);
 	}
 

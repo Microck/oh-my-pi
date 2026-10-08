@@ -47,7 +47,7 @@ import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 import { cfgDefaultThinkingLevel, cfgProvidersFireworksTier } from "./settings";
-import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels, cfgModelExclusionFilter } from "../config/model-settings";
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface ModelControlsHost {
@@ -141,11 +141,14 @@ export class ModelControls {
 		return this.#autoResolvedLevel;
 	}
 
-	/** Models explicitly scoped to the session's cycle command, minus currently disabled providers. */
+	/** Models scoped to cycling, minus disabled providers and excluded models. */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
 		const disabledProviders = cfgDisabledProviders.get(this.#host.settings);
-		if (disabledProviders.length === 0) return this.#scopedModels;
-		return this.#scopedModels.filter(scoped => !disabledProviders.includes(scoped.model.provider));
+		const include = cfgModelExclusionFilter.get(this.#host.settings);
+		if (disabledProviders.length === 0 && !include) return this.#scopedModels;
+		return this.#scopedModels.filter(
+			scoped => !disabledProviders.includes(scoped.model.provider) && (!include || include(scoped.model)),
+		);
 	}
 
 	/**

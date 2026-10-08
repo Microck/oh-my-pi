@@ -4,6 +4,7 @@
  */
 import { register, type SettingValueOf } from "./registry";
 import type { AuthAccountPolicies } from "@oh-my-pi/pi-ai/auth-storage";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { cfgDefaultThinkingLevel } from "../session/settings";
 
 /** Display metadata for one model tag. */
@@ -65,6 +66,31 @@ export const cfgEnabledModels = register({
 	type: "array",
 	default: EMPTY_STRING_ARRAY,
 	pathScoped: { valuesKey: "models" },
+});
+
+/** Full provider/id exclusions, shared by catalog reads and session cycling. */
+export const cfgExcludedModels = register({
+	id: "excludedModels",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	validate: raw => {
+		if (
+			!Array.isArray(raw) ||
+			raw.some(entry => typeof entry !== "string" || entry.indexOf("/") <= 0 || entry.endsWith("/"))
+		) {
+			throw new Error("excludedModels must be an array of provider/id strings or glob patterns");
+		}
+	},
+});
+
+// Compile once per effective settings value, including for live settings edits.
+export const cfgModelExclusionFilter = cfgExcludedModels.map(patterns => {
+	if (patterns.length === 0) return undefined;
+	const globs = patterns.map(pattern => new Bun.Glob(pattern.toLowerCase()));
+	return (model: Pick<Model, "provider" | "id">): boolean => {
+		const selector = `${model.provider}/${model.id}`.toLowerCase();
+		return !globs.some(glob => glob.match(selector));
+	};
 });
 
 export const cfgEnabledProviders = register({
