@@ -1039,7 +1039,7 @@ function sameScopedModelSet(a: ReadonlyArray<{ model: Model }>, b: ReadonlyArray
 export interface ScopedModelSink {
 	readonly isDisposed: boolean;
 	readonly scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
-	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void;
+	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>, configured?: boolean): void;
 }
 
 /**
@@ -1115,8 +1115,7 @@ export function watchScopedModelSettings(
 						activeSettings,
 					);
 		const mapped = toSessionScopedModels(rebuilt, activeSettings);
-		if (sameScopedModelSet(session.scopedModels, mapped)) return;
-		session.setScopedModels(mapped);
+		session.setScopedModels(mapped, patterns.length > 0);
 	});
 	session.addDisposer(stop);
 }
@@ -1615,6 +1614,7 @@ export async function buildSessionOptions(
 	if (scopedModels.length > 0) {
 		options.scopedModels = toSessionScopedModels(scopedModels, activeSettings);
 	}
+	options.scopedModelsConfigured = (parsed.models ?? cfgEnabledModels.get(activeSettings)).length > 0;
 
 	// API key from CLI - set in authStorage
 	// (handled by caller before createAgentSession)

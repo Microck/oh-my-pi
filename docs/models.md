@@ -40,8 +40,12 @@ Exclusions also apply to direct model lookup and session model cycling, and take
 precedence over `enabledModels`. Provider configuration, authentication, and
 discovery caches are retained. Changing the list affects subsequent catalog
 reads and rebuilds settings-derived or explicit `--models` scopes, so clearing
-exclusions restores matching models to the picker and cycle. It does not switch
-an already active conversation model. Project settings and `--config` overlays
+exclusions restores matching models to the picker and cycle. If exclusions empty
+a configured scope, Ctrl+P stays in that scope and does not select an unrelated
+model. It does not switch an already active conversation model; metadata policy
+updates still apply to that model. SDK sessions apply their settings to a supplied
+model registry, so use a separate registry for sessions with different settings.
+Project settings and `--config` overlays
 use the normal settings precedence.
 
 The extension API has no general catalog-exclusion hook. Its

@@ -1704,6 +1704,7 @@ export class AgentSession implements SettingsScope {
 		};
 		this.#models = new ModelControls(modelControlsHost, {
 			scopedModels: config.scopedModels,
+			scopedModelsConfigured: config.scopedModelsConfigured,
 			thinkingLevel: config.thinkingLevel,
 			thinkingLevelCeiling: config.thinkingLevelCeiling,
 			serviceTierByFamily: config.serviceTierByFamily,
@@ -6612,8 +6613,11 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Replace the Ctrl+P/`/models` cycle scope (post-discovery rebuild; see {@link ModelControls.setScopedModels}). */
-	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
-		this.#models.setScopedModels(scopedModels);
+	setScopedModels(
+		scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>,
+		configured = scopedModels.length > 0,
+	): void {
+		this.#models.setScopedModels(scopedModels, configured);
 	}
 
 	/** Prompt templates */
@@ -10574,7 +10578,7 @@ export class AgentSession implements SettingsScope {
 			await this.#modelRegistry.reapplyModelPolicies();
 			const currentModel = this.model;
 			if (!currentModel || this.#isDisposed) return;
-			const updated = this.#modelRegistry.find(currentModel.provider, currentModel.id);
+			const updated = this.#modelRegistry.getModelMetadata(currentModel);
 			if (updated && updated.contextWindow !== currentModel.contextWindow) {
 				await this.#setModelWithProviderSessionReset(updated);
 			}

@@ -74,6 +74,7 @@ export interface ModelControlsHost {
 export class ModelControls {
 	readonly #host: ModelControlsHost;
 	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	#scopedModelsConfigured: boolean;
 	#thinkingLevel: ThinkingLevel | undefined;
 	/** Hard per-session effort ceiling (e.g. a task spawn's `task.maxEffort` cap); recovery paths re-clamp to it. */
 	readonly #thinkingLevelCeiling: Effort | undefined;
@@ -85,6 +86,7 @@ export class ModelControls {
 		host: ModelControlsHost,
 		options: {
 			scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+			scopedModelsConfigured?: boolean;
 			thinkingLevel?: ConfiguredThinkingLevel;
 			thinkingLevelCeiling?: Effort;
 			serviceTierByFamily?: ServiceTierByFamily;
@@ -92,6 +94,7 @@ export class ModelControls {
 	) {
 		this.#host = host;
 		this.#scopedModels = options.scopedModels ?? [];
+		this.#scopedModelsConfigured = options.scopedModelsConfigured ?? this.#scopedModels.length > 0;
 		this.#serviceTierByFamily = options.serviceTierByFamily ?? {};
 		this.#thinkingLevelCeiling = options.thinkingLevelCeiling;
 		if (options.thinkingLevel === AUTO_THINKING) {
@@ -157,8 +160,12 @@ export class ModelControls {
 	 * completes so a newly-discovered `enabledModels` model joins the cycle and the
 	 * scoped `/models` picker (issue #9220).
 	 */
-	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
+	setScopedModels(
+		scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>,
+		configured = scopedModels.length > 0,
+	): void {
 		this.#scopedModels = scopedModels;
+		this.#scopedModelsConfigured = configured;
 	}
 
 	/** Live per-provider-family service-tier selection. */
@@ -308,12 +315,13 @@ export class ModelControls {
 
 	/**
 	 * Cycle to next/previous model.
-	 * Uses scoped models (from --models flag) if available, otherwise all available models.
+	 * Uses the configured scope, even when empty; otherwise all available models.
 	 * @param direction - "forward" (default) or "backward"
 	 * @returns The new model info, or undefined if only one model available
 	 */
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		if (this.scopedModels.length > 0) {
+		// An empty filtered scope is still a scope, never permission to cycle globally.
+		if (this.#scopedModelsConfigured) {
 			return this.#cycleScopedModel(direction);
 		}
 		return this.#cycleAvailableModel(direction);

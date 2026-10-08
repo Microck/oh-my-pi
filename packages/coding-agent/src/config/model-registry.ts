@@ -467,6 +467,13 @@ export class ModelRegistry {
 		this.#loadModels();
 	}
 
+	/** Bind session policy settings, rebuilding metadata offline if the source changes. */
+	async setSettings(settingsInstance: Settings): Promise<void> {
+		if (this.#settings === settingsInstance) return;
+		this.#settings = settingsInstance;
+		await this.reapplyModelPolicies();
+	}
+
 	/**
 	 * Reload models from disk (built-in + custom config).
 	 */
@@ -2945,6 +2952,11 @@ export class ModelRegistry {
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		return resolveProviderModelReference(provider, modelId, this.getProviderModels(provider));
+	}
+
+	/** Refresh metadata for an already selected model, independent of catalog exclusions. */
+	getModelMetadata(model: Model<Api>): Model<Api> | undefined {
+		return resolveProviderModelReference(model.provider, model.id, this.#modelsForProviderLookup(model.provider));
 	}
 
 	/** Whether settings disable `provider` (`disabledProviders`). */

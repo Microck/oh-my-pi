@@ -107,6 +107,8 @@ export const cfgExcludedModels = register({
 	type: "array",
 	default: EMPTY_STRING_ARRAY,
 	validate: raw => {
+		// Settings validates configured values before applying defaults.
+		if (raw === undefined) return;
 		if (
 			!Array.isArray(raw) ||
 			raw.some(entry => typeof entry !== "string" || entry.indexOf("/") <= 0 || entry.endsWith("/"))

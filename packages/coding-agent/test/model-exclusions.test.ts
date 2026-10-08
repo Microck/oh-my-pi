@@ -7,10 +7,17 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { cfgEnabledModels, cfgExcludedModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ProviderModelConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { resolveScopedModels, toSessionScopedModels, watchScopedModelSettings } from "@oh-my-pi/pi-coding-agent/main";
+import {
+	buildSessionOptions,
+	resolveScopedModels,
+	toSessionScopedModels,
+	watchScopedModelSettings,
+} from "@oh-my-pi/pi-coding-agent/main";
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { AgentSideConnection, type AnyMessage } from "@oh-my-pi/pi-utils/acp";
@@ -76,8 +83,7 @@ describe("excludedModels catalog policy", () => {
 		await directory.remove();
 	});
 
-	function startSession(): AgentSession {
-		const model = registry.find("devin", "regular-test");
+	function startSession(model = registry.find("devin", "regular-test")): AgentSession {
 		if (!model) throw new Error("Missing regular Devin fixture");
 		session = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
@@ -90,6 +96,26 @@ describe("excludedModels catalog policy", () => {
 				.map(model => ({ model })),
 		});
 		return session;
+	}
+
+	async function advertisedModels(live: AgentSession): Promise<string[]> {
+		// Exercise the real ACP connection with an in-memory client transport.
+		const input = new TransformStream<AnyMessage>();
+		const writer = input.writable.getWriter();
+		new AgentSideConnection(
+			connection => {
+				const agent = new AcpAgent(connection, async () => live);
+				acp = agent;
+				return agent;
+			},
+			{ readable: input.readable, writable: new WritableStream<AnyMessage>() },
+		);
+		if (!acp) throw new Error("ACP connection did not create an agent");
+		const response = await acp.newSession({ cwd: directory.path(), mcpServers: [] });
+		const option = response.configOptions?.find(option => option.id === "model");
+		if (!option || option.type !== "select") throw new Error("ACP did not advertise model options");
+		await writer.close();
+		return option.options.flatMap(entry => ("value" in entry ? [entry.value] : []));
 	}
 
 	it("hides an exact provider-qualified ID from lazy lookup and the full catalog without hiding another provider's ID", () => {
@@ -132,26 +158,10 @@ describe("excludedModels catalog policy", () => {
 		expect(registry.getProviderBaseUrl("devin")).toBe("https://example.invalid/v1");
 		expect(await registry.getApiKeyForProvider("devin")).toBe("fixture-key");
 
-		// Exercise the real ACP connection with an in-memory client transport.
-		const input = new TransformStream<AnyMessage>();
-		const writer = input.writable.getWriter();
-		new AgentSideConnection(
-			connection => {
-				const agent = new AcpAgent(connection, async () => live);
-				acp = agent;
-				return agent;
-			},
-			{ readable: input.readable, writable: new WritableStream<AnyMessage>() },
-		);
-		if (!acp) throw new Error("ACP connection did not create an agent");
-		const response = await acp.newSession({ cwd: directory.path(), mcpServers: [] });
-		const modelOption = response.configOptions?.find(option => option.id === "model");
-		if (!modelOption || modelOption.type !== "select") throw new Error("ACP did not advertise model options");
-		const advertised = modelOption.options.flatMap(option => ("value" in option ? [option.value] : []));
+		const advertised = await advertisedModels(live);
 		expect(advertised).toEqual(catalog);
 		expect(advertised.filter(selector => selector.startsWith("devin/fusion-"))).toEqual([]);
 		expect(advertised).toContain("devin/regular-test");
-		await writer.close();
 	});
 
 	it("keeps exclusions after refresh and filters newly registered or discovered models", async () => {
@@ -224,9 +234,110 @@ describe("excludedModels catalog policy", () => {
 		expect(live.scopedModels).toHaveLength(explicit ? 4 : 1);
 	});
 
-	it("retains the complete catalog and available model list when exclusions are omitted or empty", () => {
+	it.each(["enabledModels", "--models"])("does not cycle outside an all-excluded scope (%s)", async source => {
+		const patterns = ["devin/regular-test*"];
+		cfgEnabledModels.set(settings, patterns);
+		const parsed = parseArgs(source === "--models" ? ["--models", patterns.join(",")] : []);
+		const live = startSession();
+		live.setScopedModels(toSessionScopedModels(await resolveScopedModels(parsed, registry, settings), settings));
+		watchScopedModelSettings(live, parsed, registry, settings);
+
+		cfgExcludedModels.set(settings, patterns);
+		// Both immediate filtering and the completed rebuild must retain scoped mode.
+		expect(await live.cycleModel()).toBeUndefined();
+		await Bun.sleep(0);
+		expect(live.scopedModels).toEqual([]);
+		expect(await live.cycleModel()).toBeUndefined();
+		expect(live.model?.id).toBe("regular-test");
+		expect(selectors(registry.getAvailable())).toContain("devin/fusion-test");
+
+		cfgExcludedModels.set(settings, []);
+		await Bun.sleep(0);
+		expect((await live.cycleModel())?.model.id).toBe("regular-test-v2");
+		if (source === "enabledModels") {
+			cfgEnabledModels.set(settings, []);
+			await Bun.sleep(0);
+			expect((await live.cycleModel())?.isScoped).toBe(false);
+		}
+	});
+
+	it("updates the active excluded model's context limit when extended context is disabled", async () => {
+		auth.keys.setRuntime("openai-codex", "fixture-key");
+		cfgExtendedContext.set(settings, true);
+		await registry.reapplyModelPolicies();
+		const live = startSession(registry.find("openai-codex", "gpt-5.6-sol"));
+		expect(live.model?.contextWindow).toBeGreaterThan(272_000);
+		cfgExcludedModels.set(settings, ["openai-codex/gpt-5.6-sol"]);
+		expect(registry.find("openai-codex", "gpt-5.6-sol")).toBeUndefined();
+
+		cfgExtendedContext.set(settings, false);
+		await registry.reapplyModelPolicies();
+		await Bun.sleep(0);
+		expect(live.model?.contextWindow).toBe(272_000);
+		expect(live.model?.id).toBe("gpt-5.6-sol");
+		expect(selectors(live.getAvailableModels())).not.toContain("openai-codex/gpt-5.6-sol");
+	});
+
+	it("keeps an all-excluded CLI scope from cycling globally at startup", async () => {
+		const parsed = parseArgs(["--models", "devin/regular-test*"]);
+		cfgExcludedModels.set(settings, ["devin/regular-test*"]);
+		const scope = await resolveScopedModels(parsed, registry, settings);
+		const options = await buildSessionOptions(parsed, scope, undefined, registry, settings);
+		const model = registry.find("devin", "fusion-test");
+		if (!model) throw new Error("Missing unexcluded startup model");
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: registry,
+			scopedModels: options.scopedModels,
+			scopedModelsConfigured: options.scopedModelsConfigured,
+		});
+		expect(scope).toEqual([]);
+		expect(await session.cycleModel()).toBeUndefined();
+		expect(session.model?.id).toBe("fusion-test");
+	});
+
+	it("applies isolated SDK settings to a caller-owned registry for selection and ACP", async () => {
+		registry = new ModelRegistry(auth, path.join(directory.path(), "models.yml"));
+		cfgExcludedModels.set(settings, ["devin/fusion-*"]);
+		settings.setModelRole("default", "devin/*");
+		({ session } = await createAgentSession({
+			cwd: directory.path(),
+			agentDir: directory.path(),
+			modelRegistry: registry,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: [],
+		}));
+		expect(session.model?.id.startsWith("fusion-")).toBe(false);
+		const catalog = selectors(session.getAvailableModels());
+		expect(catalog.filter(selector => selector.startsWith("devin/fusion-"))).toEqual([]);
+		expect(catalog).toContain("devin/regular-test");
+		expect(registry.find("devin", "fusion-test")).toBeUndefined();
+
+		expect(await advertisedModels(session)).toEqual(catalog);
+	});
+
+	it("retains the complete catalog and available model list when exclusions are omitted or empty", async () => {
 		const catalog = selectors(registry.getAll("all"));
 		const available = selectors(registry.getAvailable());
+		// Unlike in-memory settings, disk loading validates every absent setting.
+		const diskSettings = await Settings.loadReadOnly({ cwd: directory.path(), agentDir: directory.path() });
+		const diskRegistry = new ModelRegistry(auth, path.join(directory.path(), "models.yml"), {
+			settings: diskSettings,
+		});
+		expect(selectors(diskRegistry.getAvailable())).toEqual(available);
 		expect(available).toContain("devin/fusion-test");
 		expect(available).toContain("devin/regular-test");
 		cfgExcludedModels.set(settings, []);
