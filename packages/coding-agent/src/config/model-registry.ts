@@ -2951,11 +2951,15 @@ export class ModelRegistry {
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		return resolveProviderModelReference(provider, modelId, this.getProviderModels(provider));
+		// Resolve against the stable snapshot so reference indexes stay cached.
+		const model = this.getModelMetadata({ provider, id: modelId });
+		if (!model || (!this.#settings && !isSettingsInitialized())) return model;
+		const include = cfgModelExclusionFilter.get(this.#settings ?? settings);
+		return include && !include(model) ? undefined : model;
 	}
 
-	/** Refresh metadata for an already selected model, independent of catalog exclusions. */
-	getModelMetadata(model: Model<Api>): Model<Api> | undefined {
+	/** Look up metadata for a selected model, independent of catalog exclusions. */
+	getModelMetadata(model: Pick<Model<Api>, "provider" | "id">): Model<Api> | undefined {
 		return resolveProviderModelReference(model.provider, model.id, this.#modelsForProviderLookup(model.provider));
 	}
 
@@ -3094,7 +3098,10 @@ export class ModelRegistry {
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
-		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
+		// Selection exclusions do not remove an active model's account eligibility.
+		const accountAccess = options?.modelId
+			? this.getModelMetadata({ provider, id: options.modelId })?.accountAccess
+			: undefined;
 		return this.authStorage.keys.getWithCredential(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,

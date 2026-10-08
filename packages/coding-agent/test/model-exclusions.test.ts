@@ -283,6 +283,31 @@ describe("excludedModels catalog policy", () => {
 		expect(await live.cycleModel(direction)).toBeUndefined();
 	});
 
+	it("keeps interactive role cycling and quick-role choices inside the configured scope", async () => {
+		const live = startSession();
+		const scope = live.scopedModels.filter(entry => entry.model.id.startsWith("regular-test"));
+		live.setScopedModels(scope);
+		settings.setModelRole("default", "devin/fusion-test");
+		settings.setModelRole("slow", "devin/fusion-test-v2");
+		cfgExcludedModels.set(settings, ["devin/regular-test*"]);
+		expect(live.getRoleModelCycle(["default", "slow"])).toBeUndefined();
+		expect(await live.cycleRoleModels(["default", "slow"])).toBeUndefined();
+		expect(live.model?.id).toBe("regular-test");
+		live.setScopedModels([], false);
+		expect(live.getRoleModelCycle(["default", "slow"])?.models).toHaveLength(2);
+		expect((await live.cycleRoleModels(["default", "slow"]))?.model.id).toBe("fusion-test-v2");
+	});
+
+	it.each(["forward", "backward"] as const)("cycles roles %s to the sole eligible scoped model", async direction => {
+		const live = startSession();
+		settings.setModelRole("default", "devin/regular-test");
+		settings.setModelRole("slow", "devin/regular-test-v2");
+		live.setScopedModels(live.scopedModels.filter(entry => entry.model.id.startsWith("regular-test")));
+		cfgExcludedModels.set(settings, ["devin/regular-test"]);
+		expect((await live.cycleRoleModels(["slow"], direction))?.model.id).toBe("regular-test-v2");
+		expect(await live.cycleRoleModels(["slow"], direction)).toBeUndefined();
+	});
+
 	it("keeps configured-empty picker, hub, and mention scopes empty until the scope is cleared", async () => {
 		const live = startSession();
 		live.setScopedModels([], true);

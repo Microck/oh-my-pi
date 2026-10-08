@@ -335,7 +335,7 @@ export class ModelControls {
 	/**
 	 * Resolve the configured role models in the given order plus the index of
 	 * the currently active one. Roles that have no configured model, or whose
-	 * configured model is not currently available, are skipped. The `default`
+	 * configured model is outside the available session scope, are skipped. The `default`
 	 * role falls back to the active model when no explicit assignment exists.
 	 *
 	 * Returns `undefined` only when there is no current model or no available
@@ -343,7 +343,9 @@ export class ModelControls {
 	 * still guard on `models.length`).
 	 */
 	getRoleModelCycle(roleOrder: readonly string[]): RoleModelCycle | undefined {
-		const availableModels = this.#host.modelRegistry.getAvailable();
+		const availableModels = this.#scopedModelsConfigured
+			? this.scopedModels.map(entry => entry.model)
+			: this.#host.modelRegistry.getAvailable();
 		if (availableModels.length === 0) return undefined;
 
 		const currentModel = this.#model;
@@ -414,7 +416,8 @@ export class ModelControls {
 		direction: "forward" | "backward" = "forward",
 	): Promise<RoleModelCycleResult | undefined> {
 		const cycle = this.getRoleModelCycle(roleOrder);
-		if (!cycle || cycle.models.length <= 1) return undefined;
+		if (!cycle) return undefined;
+		if (cycle.models.length === 1 && modelsAreEqual(cycle.models[0].model, this.#model)) return undefined;
 
 		const step = direction === "backward" ? -1 : 1;
 		const next = cycle.models[(cycle.currentIndex + step + cycle.models.length) % cycle.models.length];
