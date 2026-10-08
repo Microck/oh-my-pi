@@ -26,17 +26,23 @@ excludedModels:
   - devin/fusion-*
 ```
 
-Entries match the complete `provider/id`, case-insensitively, using Bun glob
-syntax (`*`, `?`, and character classes). Exact entries match only that provider
-and ID. There is no fuzzy matching or thinking-level suffix parsing. The example
+Entries match the complete `provider/id`, case-insensitively, by literal equality
+or Bun glob syntax (`*`, `?`, and character classes). Literal comparison also
+handles copied IDs containing glob characters, such as
+`zhipu-coding-plan/glm-5.2-highspeed[1m]`. There is no fuzzy matching or thinking-level suffix parsing. The example
 hides Devin's `fusion-*` models while keeping its other models available.
-Quote YAML entries beginning with `*`. An omitted or empty list excludes nothing.
+Quote YAML entries beginning with `*`. Incomplete escapes, unbalanced brackets or
+braces, empty character classes, and reversed character ranges are rejected.
+Escape unmatched literal brackets and braces with a backslash. An omitted or empty list
+excludes nothing.
 
 Exclusions also apply to direct model lookup and session model cycling, and take
 precedence over `enabledModels`. Provider configuration, authentication, and
 discovery caches are retained. Changing the list affects subsequent catalog
-reads; it does not switch an already active conversation model. Project settings
-and `--config` overlays use the normal settings precedence.
+reads and rebuilds settings-derived or explicit `--models` scopes, so clearing
+exclusions restores matching models to the picker and cycle. It does not switch
+an already active conversation model. Project settings and `--config` overlays
+use the normal settings precedence.
 
 The extension API has no general catalog-exclusion hook. Its
 `registerProvider({ oauth: { modifyModels } })` hook can project a catalog before

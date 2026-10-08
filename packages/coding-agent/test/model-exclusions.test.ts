@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { cfgExcludedModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgEnabledModels, cfgExcludedModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ProviderModelConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { resolveScopedModels, toSessionScopedModels, watchScopedModelSettings } from "@oh-my-pi/pi-coding-agent/main";
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -100,6 +102,25 @@ describe("excludedModels catalog policy", () => {
 		expect(selectors(registry.getAvailable())).not.toContain("devin/fusion-test");
 	});
 
+	it("excludes a copied bundled selector containing glob characters", () => {
+		const provider = "zhipu-coding-plan";
+		const id = "glm-5.2-highspeed[1m]";
+		const selector = `${provider}/${id}`;
+		auth.keys.setRuntime(provider, "fixture-key");
+		expect(registry.find(provider, id)).toBeDefined();
+		expect(selectors(registry.getAvailableForProviders(new Set([provider])))).toContain(selector);
+
+		cfgExcludedModels.set(settings, [selector.toUpperCase()]);
+		expect(registry.find(provider, id)).toBeUndefined();
+		expect(selectors(registry.getAll())).not.toContain(selector);
+		expect(selectors(registry.getAvailable())).not.toContain(selector);
+		expect(registry.find(provider, "glm-5.2-highspeed")).toBeDefined();
+
+		cfgExcludedModels.set(settings, []);
+		expect(registry.find(provider, id)).toBeDefined();
+		expect(selectors(registry.getAvailable())).toContain(selector);
+	});
+
 	it("omits devin/fusion-* from the normal catalog and ACP options while preserving regular Devin models and auth", async () => {
 		cfgExcludedModels.set(settings, ["devin/fusion-*"]);
 		const live = startSession();
@@ -165,6 +186,44 @@ describe("excludedModels catalog policy", () => {
 		expect(selectors(live.scopedModels.map(entry => entry.model))).toContain("devin/fusion-test");
 	});
 
+	it.each(["enabledModels", "--models"])("restores a scope built with exclusions enabled (%s)", async source => {
+		const explicit = source === "--models";
+		const patterns = ["devin/regular-test*", "devin/fusion-*"];
+		cfgEnabledModels.set(settings, patterns);
+		cfgExcludedModels.set(settings, ["devin/fusion-*"]);
+		const parsed = parseArgs(explicit ? ["--models", patterns.join(",")] : []);
+		const initialScope = await resolveScopedModels(parsed, registry, settings);
+		const live = startSession();
+		live.setScopedModels(toSessionScopedModels(initialScope, settings));
+		watchScopedModelSettings(live, parsed, registry, settings);
+		expect(selectors(live.scopedModels.map(entry => entry.model))).toEqual([
+			"devin/regular-test",
+			"devin/regular-test-v2",
+		]);
+
+		cfgExcludedModels.set(settings, []);
+		// Settings listeners coalesce in a microtask; let async scope resolution settle.
+		await Bun.sleep(0);
+		expect(selectors(live.scopedModels.map(entry => entry.model))).toEqual([
+			"devin/regular-test",
+			"devin/regular-test-v2",
+			"devin/fusion-test",
+			"devin/fusion-test-v2",
+		]);
+		expect((await live.cycleModel())?.model.id).toBe("regular-test-v2");
+		expect((await live.cycleModel())?.model.id).toBe("fusion-test");
+
+		cfgExcludedModels.set(settings, ["devin/fusion-*"]);
+		await Bun.sleep(0);
+		expect(selectors(live.scopedModels.map(entry => entry.model))).not.toContain("devin/fusion-test");
+		// An enabledModels edit must still leave an explicit CLI scope pinned.
+		cfgEnabledModels.set(settings, ["devin/regular-test"]);
+		await Bun.sleep(0);
+		cfgExcludedModels.set(settings, []);
+		await Bun.sleep(0);
+		expect(live.scopedModels).toHaveLength(explicit ? 4 : 1);
+	});
+
 	it("retains the complete catalog and available model list when exclusions are omitted or empty", () => {
 		const catalog = selectors(registry.getAll("all"));
 		const available = selectors(registry.getAvailable());
@@ -179,5 +238,28 @@ describe("excludedModels catalog policy", () => {
 		expect(() => cfgExcludedModels.set(settings, ["fusion-*"])).toThrow("provider/id");
 		expect(() => Settings.isolated({ excludedModels: [42] })).toThrow("provider/id");
 		expect(selectors(registry.getAvailable())).toContain("devin/fusion-test");
+	});
+	it.each([
+		"devin/fusion-[",
+		"devin/fusion-[]",
+		"devin/fusion-[!]",
+		"devin/fusion-[z-a]",
+		"devin/fusion-[Z-a]",
+		"devin/fusion-{test,v2",
+		"devin/fusion-test}",
+		"devin/fusion-\\",
+	])("rejects malformed glob %s at the settings boundary", pattern => {
+		expect(() => cfgExcludedModels.set(settings, [pattern])).toThrow("Invalid excludedModels glob pattern");
+		expect(() => Settings.isolated({ excludedModels: [pattern] })).toThrow("Invalid excludedModels glob pattern");
+		expect(selectors(registry.getAvailable())).toContain("devin/fusion-test");
+	});
+
+	it.each([
+		"devin/fusion-[tv]*",
+		"devin/fusion-{test,test-v2}",
+		"devin/{fusion-{test,test-v2},regular-test}",
+		"devin/fusion-\\[test",
+	])("accepts complete glob %s", pattern => {
+		expect(() => cfgExcludedModels.set(settings, [pattern])).not.toThrow();
 	});
 });

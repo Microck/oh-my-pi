@@ -173,7 +173,7 @@ import {
 	cfgOmitThinking,
 	cfgPrewalkEnabled,
 } from "./session/settings";
-import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels, cfgExcludedModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
@@ -1078,14 +1078,19 @@ export async function rebuildScopedModelsAfterDiscovery(
 }
 
 /** Settings the scoped model list follows (see {@link watchScopedModelSettings}). */
-const cfgScopedModelInputs = combine({ enabledModels: cfgEnabledModels, disabledProviders: cfgDisabledProviders });
+const cfgScopedModelInputs = combine({
+	enabledModels: cfgEnabledModels,
+	disabledProviders: cfgDisabledProviders,
+	excludedModels: cfgExcludedModels,
+});
 
 /**
  * Keep the Ctrl+P / scoped `/models` list in step with live settings: an
  * `enabledModels` edit re-resolves a settings-derived scope (an explicit
  * `--models` scope stays pinned), and a `disabledProviders` edit re-resolves
  * after the catalog rebuild so re-enabled providers rejoin (disabled ones are
- * already filtered from `session.scopedModels` at read time).
+ * already filtered from `session.scopedModels` at read time). Exclusion edits
+ * re-resolve both scope sources so models excluded at startup can rejoin.
  */
 export function watchScopedModelSettings(
 	session: ScopedModelSink & Pick<AgentSession, "addDisposer">,
@@ -1095,7 +1100,8 @@ export function watchScopedModelSettings(
 ): void {
 	const stop = cfgScopedModelInputs.listen(activeSettings, async (next, previous) => {
 		const providersChanged = !Bun.deepEquals(next.disabledProviders, previous.disabledProviders);
-		if (parsed.models && !providersChanged) return;
+		const exclusionsChanged = !Bun.deepEquals(next.excludedModels, previous.excludedModels);
+		if (parsed.models && !providersChanged && !exclusionsChanged) return;
 		if (providersChanged) await modelRegistry.reapplyModelPolicies();
 		if (session.isDisposed) return;
 		const patterns = parsed.models ?? cfgEnabledModels.get(activeSettings);

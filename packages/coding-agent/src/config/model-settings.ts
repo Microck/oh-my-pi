@@ -68,6 +68,39 @@ export const cfgEnabledModels = register({
 	pathScoped: { valuesKey: "models" },
 });
 
+/** Bun accepts incomplete glob tokens; reject likely typos at the configuration boundary. */
+function validateModelExclusionGlob(pattern: string): void {
+	const invalid = () => new Error(`Invalid excludedModels glob pattern: ${pattern}`);
+	let classStart = -1;
+	let braceDepth = 0;
+	for (let index = 0; index < pattern.length; index++) {
+		const char = pattern[index];
+		if (char === "\\") {
+			if (++index === pattern.length) throw invalid();
+			continue;
+		}
+		if (classStart !== -1) {
+			if (char === "]") {
+				const body = pattern.slice(classStart + 1, index).toLowerCase();
+				if (body === "" || body === "!" || body === "^") throw invalid();
+				// Regex compilation also catches reversed ranges such as [z-a].
+				try {
+					new RegExp(`[${body.replace(/^!/, "^")}]`);
+				} catch {
+					throw invalid();
+				}
+				classStart = -1;
+			}
+			continue;
+		}
+		if (char === "[") classStart = index;
+		else if (char === "{") braceDepth++;
+		else if (char === "}" && --braceDepth < 0) throw invalid();
+		else if (char === "]") throw invalid();
+	}
+	if (classStart !== -1 || braceDepth !== 0) throw invalid();
+}
+
 /** Full provider/id exclusions, shared by catalog reads and session cycling. */
 export const cfgExcludedModels = register({
 	id: "excludedModels",
@@ -80,16 +113,21 @@ export const cfgExcludedModels = register({
 		) {
 			throw new Error("excludedModels must be an array of provider/id strings or glob patterns");
 		}
+		for (const pattern of raw) validateModelExclusionGlob(pattern);
 	},
 });
 
 // Compile once per effective settings value, including for live settings edits.
 export const cfgModelExclusionFilter = cfgExcludedModels.map(patterns => {
 	if (patterns.length === 0) return undefined;
-	const globs = patterns.map(pattern => new Bun.Glob(pattern.toLowerCase()));
+	const exclusions = patterns.map(pattern => {
+		const selector = pattern.toLowerCase();
+		return { selector, glob: new Bun.Glob(selector) };
+	});
 	return (model: Pick<Model, "provider" | "id">): boolean => {
 		const selector = `${model.provider}/${model.id}`.toLowerCase();
-		return !globs.some(glob => glob.match(selector));
+		// Catalog IDs can themselves contain glob characters, e.g. highspeed[1m].
+		return !exclusions.some(exclusion => exclusion.selector === selector || exclusion.glob.match(selector));
 	};
 });
 
