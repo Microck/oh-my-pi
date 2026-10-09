@@ -48,7 +48,7 @@ import type {
 	ResolvedModelRoleValue,
 } from "./model-browser";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../thinking";
-import { thinkingLevelGlyph } from "../render/render-utils";
+import { sanitizeDisplayWarning, thinkingLevelGlyph } from "../render/render-utils";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import {
@@ -172,12 +172,21 @@ export interface ModelHubCallbacks {
 	onCycleOrderChange?: (order: string[]) => void;
 	/**
 	 * Persist typed text as `model`'s own compaction point: a token count (`90000`,
-	 * `90k`, `1M`), a percentage (`80%`), or empty to reset. Returns an error
-	 * message for input it rejects, which keeps the field open.
+	 * `90k`, `1M`), a percentage (`80%`), or empty to reset. Rejected input
+	 * returns `{ kind: "error" }`; input that needs acknowledgement (a point past
+	 * the standard window) returns `{ kind: "confirm" }` until called again with
+	 * the same text and `confirmed`. Either keeps the field open.
 	 */
-	onCompactionPointChange?: (model: Model, input: string) => string | undefined;
+	onCompactionPointChange?: (
+		model: Model,
+		input: string,
+		confirmed: boolean,
+	) => CompactionPointChangeResult | undefined;
 	onCancel: () => void;
 }
+
+/** Why {@link ModelHubCallbacks.onCompactionPointChange} kept the field open. */
+export type CompactionPointChangeResult = { kind: "error"; message: string } | { kind: "confirm"; message: string };
 
 export interface ModelHubOptions {
 	/** A configured scope stays active even if no models currently match it. */
@@ -234,12 +243,16 @@ type StripState =
 			input: Input;
 	  }
 	| {
-			/** Footer text input setting `model`'s compaction point; `error` is the last rejection. */
+			/**
+			 * Footer text input setting `model`'s compaction point; `error` is the last
+			 * rejection, `confirm` the warning a second Enter on the same `value` accepts.
+			 */
 			kind: "name";
 			purpose: "compaction";
 			model: Model;
 			input: Input;
 			error?: string;
+			confirm?: { value: string; message: string };
 	  };
 
 /** A Roles-view command; keys and the picker's action bar both run {@link ModelHubComponent}'s `#runRolesAction`. */
@@ -306,6 +319,29 @@ const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
 /** Accepted compaction point input, shown beside the field. */
 const COMPACTION_INPUT_HINT = "90000 · 90k · 1m · 80% · empty resets";
+
+type CompactionStrip = Extract<StripState, { purpose: "compaction" }>;
+
+/** Whether the compaction field still holds the text its pending warning was raised for. */
+function compactionConfirmPending(strip: CompactionStrip): boolean {
+	return strip.confirm !== undefined && strip.confirm.value === strip.input.getValue();
+}
+
+/**
+ * The note beside the compaction field: the last error, a pending warning, or
+ * the input hint. Host messages embed model ids and config text, so both are
+ * sanitized for every render path (terminal footer, Tern picker and strip).
+ */
+function compactionNotice(strip: CompactionStrip): { text: string; style: "error" | "warning" | "dim" } {
+	if (strip.error) return { text: sanitizeDisplayWarning(strip.error), style: "error" };
+	// The footer hint and the primary action already say Enter accepts; the
+	// notice stays short so it fits beside the field.
+	if (strip.confirm && compactionConfirmPending(strip)) {
+		return { text: sanitizeDisplayWarning(strip.confirm.message), style: "warning" };
+	}
+	return { text: COMPACTION_INPUT_HINT, style: "dim" };
+}
+
 const MODEL_KIND_TABS: ReadonlyArray<"all" | ModelKind> = ["all", ...MODEL_KINDS];
 const ROLE_TABS = ["all", "chat", "kind"] as const;
 type RoleTab = (typeof ROLE_TABS)[number];
@@ -1804,9 +1840,16 @@ export class ModelHubComponent implements Component {
 		const strip = this.#strip;
 		if (strip?.kind !== "name") return;
 		if (strip.purpose === "compaction") {
-			const error = this.#callbacks.onCompactionPointChange?.(strip.model, strip.input.getValue());
-			if (error !== undefined) {
-				strip.error = error;
+			const value = strip.input.getValue();
+			const result = this.#callbacks.onCompactionPointChange?.(strip.model, value, compactionConfirmPending(strip));
+			if (result?.kind === "error") {
+				strip.error = result.message;
+				strip.confirm = undefined;
+				return;
+			}
+			if (result?.kind === "confirm") {
+				strip.error = undefined;
+				strip.confirm = { value, message: result.message };
 				return;
 			}
 			this.#strip = null;
@@ -2725,7 +2768,9 @@ export class ModelHubComponent implements Component {
 		const strip = this.#strip;
 		if (strip) {
 			if (strip.kind === "name") {
-				if (strip.purpose === "compaction") return `${enter} set compaction point · ${cancel} cancel`;
+				if (strip.purpose === "compaction") {
+					return `${enter} ${compactionConfirmPending(strip) ? "accept" : "set"} compaction point · ${cancel} cancel`;
+				}
 				if (strip.purpose === "preset") {
 					return `${enter} save preset · ${cancel} cancel`;
 				}
@@ -2817,14 +2862,18 @@ export class ModelHubComponent implements Component {
 						? "Preset name:"
 						: "New role name:";
 			const label = theme.fg("accent", labelText);
-			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth(labelText) - 24));
+			// A compaction point is at most a few characters (`1500k`, `12.5%`); a
+			// narrow field leaves the row for its notice.
+			const maxInputWidth = strip.purpose === "compaction" ? 10 : 32;
+			const inputWidth = Math.max(8, Math.min(maxInputWidth, width - visibleWidth(labelText) - 24));
 			const inputLine = strip.input.render(inputWidth)[0] ?? "";
-			const hint =
-				strip.purpose !== "compaction"
-					? theme.fg("dim", "(letters, digits, - and _)")
-					: strip.error
-						? theme.fg("error", strip.error)
-						: theme.fg("dim", COMPACTION_INPUT_HINT);
+			let hint: string;
+			if (strip.purpose === "compaction") {
+				const notice = compactionNotice(strip);
+				hint = theme.fg(notice.style, notice.text);
+			} else {
+				hint = theme.fg("dim", "(letters, digits, - and _)");
+			}
 			return truncateToWidth(`${label} ${inputLine} ${hint}`, width);
 		}
 
@@ -3479,7 +3528,12 @@ export class ModelHubComponent implements Component {
 			const apply =
 				strip.kind === "name"
 					? strip.purpose === "compaction"
-						? pickerAction("compactionPoint", "Set compaction point", "enter", { primary: true })
+						? pickerAction(
+								"compactionPoint",
+								compactionConfirmPending(strip) ? "Accept compaction point" : "Set compaction point",
+								"enter",
+								{ primary: true },
+							)
 						: pickerAction(
 								strip.purpose === "preset" ? "presetName" : "roleName",
 								strip.purpose === "preset" ? "Save preset" : "Create role",
@@ -3583,6 +3637,7 @@ export class ModelHubComponent implements Component {
 	#pickerStrip(strip: StripState): NonNullable<TspPickerProps["strip"]> {
 		if (strip.kind === "name") {
 			if (strip.purpose === "compaction") {
+				const notice = compactionNotice(strip);
 				return {
 					label: [
 						span("Compact ", "muted"),
@@ -3590,7 +3645,7 @@ export class ModelHubComponent implements Component {
 						span(" at ", "muted"),
 						span(strip.input.getValue(), "mono"),
 						span("▏", "accent"),
-						span(`  ${strip.error ?? COMPACTION_INPUT_HINT}`, strip.error ? "error" : "dim"),
+						span(`  ${notice.text}`, notice.style),
 					],
 					items: [],
 				};
@@ -3969,13 +4024,14 @@ export class ModelHubComponent implements Component {
 		if (!strip) return undefined;
 		if (strip.kind === "name") {
 			if (strip.purpose === "compaction") {
+				const notice = compactionNotice(strip);
 				return node(
 					"row",
 					{ gap: "sm", align: "center" },
 					[
 						text([span(`Compact ${strip.model.id} at:`, "accent")]),
 						col([strip.input], { grow: 1 }),
-						text([span(strip.error ?? COMPACTION_INPUT_HINT, strip.error ? "error" : "dim")]),
+						text([span(notice.text, notice.style)], { wrap: "word" }),
 					],
 					"compactionPoint",
 				);
@@ -4034,7 +4090,13 @@ export class ModelHubComponent implements Component {
 			switch (strip.kind) {
 				case "name":
 					return strip.purpose === "compaction"
-						? [keys("set compaction point", "enter"), cancel("cancel")]
+						? [
+								keys(
+									compactionConfirmPending(strip) ? "accept compaction point" : "set compaction point",
+									"enter",
+								),
+								cancel("cancel"),
+							]
 						: strip.purpose === "preset"
 							? [keys("save preset", "enter"), cancel("cancel")]
 							: [keys("create + pick model", "enter"), cancel("cancel")];
