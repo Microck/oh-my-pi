@@ -1562,7 +1562,7 @@ export async function buildSessionOptions(
 			modelRegistry,
 			modelMatchPreferences,
 			disabledProviders,
-			{ deferUnregistered: true },
+			{ deferUnregistered: true, settings: activeSettings },
 		);
 		if (selection.deferred) {
 			// Preserve role fallback order until extensions have registered their providers.
@@ -1580,7 +1580,12 @@ export async function buildSessionOptions(
 	}
 	if (parsed.planYolo) {
 		const rolePattern = expandRoleAlias(parsed.planYoloInto ?? "@smol", activeSettings);
-		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		const resolved = resolveCliModel({
+			cliModel: rolePattern,
+			modelRegistry,
+			preferences: modelMatchPreferences,
+			settings: activeSettings,
+		});
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}

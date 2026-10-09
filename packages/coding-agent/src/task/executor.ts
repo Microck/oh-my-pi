@@ -4111,6 +4111,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					"options.authStorage and options.modelRegistry.authStorage must be the same instance when both are provided",
 				);
 			}
+			await awaitAbortable(modelRegistry.setSettings(settings));
 			checkAbort();
 			if (!registryFromParent) {
 				modelRegistry.refreshInBackground();

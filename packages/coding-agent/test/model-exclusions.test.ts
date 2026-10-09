@@ -144,12 +144,15 @@ describe("excludedModels catalog policy", () => {
 		return option.options.flatMap(entry => ("value" in entry ? [entry.value] : []));
 	}
 
-	it("rejects an excluded task override before creating a session with an owned registry", async () => {
-		// A fresh process isolates default registry paths and credentials from the test runner.
-		const program = `
+	it.each(["owned", "supplied"])(
+		"rejects an excluded task override with a %s registry",
+		async ownership => {
+			// A fresh process isolates default registry paths and credentials from the test runner.
+			const program = `
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 const auth = await AuthStorage.create(":memory:");
 try {
 	const result = await runSubprocess({
@@ -158,32 +161,35 @@ try {
 		task: "test", index: 0, id: "excluded-task-model", enableLsp: false,
 		modelOverride: ["fusion-test"], maxRuntimeMs: 5000,
 		authStorage: auth, settings: Settings.isolated({ excludedModels: ["*/*"] }),
+		modelRegistry: ${ownership === "supplied" ? "new ModelRegistry(auth)" : "undefined"},
 	});
 	process.stdout.write(JSON.stringify(result));
 } finally { auth.close(); }
 `;
-		const child = Bun.spawn([process.execPath, "--eval", program], {
-			cwd: path.resolve(import.meta.dir, "../../.."),
-			env: {
-				PATH: process.env.PATH,
-				PI_CODING_AGENT_DIR: directory.path(),
-				XDG_CONFIG_HOME: directory.path(),
-				XDG_DATA_HOME: directory.path(),
-			},
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		const [output, errors, exitCode] = await Promise.all([
-			new Response(child.stdout).text(),
-			new Response(child.stderr).text(),
-			child.exited,
-		]);
-		expect({ exitCode, errors }).toEqual({ exitCode: 0, errors: "" });
-		const result: SingleResult = JSON.parse(output);
-		expect(result.exitCode).toBe(1);
-		expect(result.resolvedModelIdentity).toBeUndefined();
-		expect(result.error).toMatch(/No models available|No model selected|not found|not available/i);
-	}, 30_000);
+			const child = Bun.spawn([process.execPath, "--eval", program], {
+				cwd: path.resolve(import.meta.dir, "../../.."),
+				env: {
+					PATH: process.env.PATH,
+					PI_CODING_AGENT_DIR: directory.path(),
+					XDG_CONFIG_HOME: directory.path(),
+					XDG_DATA_HOME: directory.path(),
+				},
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [output, errors, exitCode] = await Promise.all([
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+				child.exited,
+			]);
+			expect({ exitCode, errors }).toEqual({ exitCode: 0, errors: "" });
+			const result: SingleResult = JSON.parse(output);
+			expect(result.exitCode).toBe(1);
+			expect(result.resolvedModelIdentity).toBeUndefined();
+			expect(result.error).toMatch(/No models available|No model selected|not found|not available/i);
+		},
+		30_000,
+	);
 
 	it("refuses an excluded exact selector instead of recycling it as a variant alias", async () => {
 		const selector = "google-antigravity/gemini-3-flash";
@@ -216,6 +222,57 @@ try {
 		expect(resolveCliModel({ cliModel: selector, modelRegistry: registry, settings }).model?.id).toBe(
 			"gemini-3-flash",
 		);
+	});
+
+	it.each(["prewalk", "plan-yolo"])("does not rebind an excluded --%s-into selector to its alias", async handoff => {
+		const selector = "google-antigravity/gemini-3-flash";
+		auth.keys.setRuntime("google-antigravity", "fixture-key");
+		const build = () =>
+			buildSessionOptions(
+				parseArgs([
+					"--cwd",
+					directory.path(),
+					"--model",
+					"devin/regular-test",
+					`--${handoff}`,
+					`--${handoff}-into`,
+					selector,
+				]),
+				[],
+				SessionManager.inMemory(),
+				registry,
+				settings,
+			);
+		const initial = await build();
+		expect((handoff === "prewalk" ? initial.prewalk : initial.planYolo)?.target.id).toBe("gemini-3-flash");
+		cfgExcludedModels.set(settings, [selector]);
+		if (handoff === "prewalk") {
+			const filtered = await build();
+			expect(filtered.prewalk).toBeUndefined();
+		} else {
+			await expect(build()).rejects.toThrow(/not found|not available|excluded/i);
+		}
+		expect(registry.find("google-antigravity", "gemini-3.5-flash")?.id).toBe("gemini-3.5-flash");
+	});
+
+	it.each([false, true])("keeps real alias-source cooldowns distinct (excluded=%s)", excluded => {
+		const source = "google-antigravity/gemini-3-flash";
+		const target = "google-antigravity/gemini-3.5-flash";
+		const until = Date.now() + 60_000;
+		expect(registry.getModelMetadata({ provider: "google-antigravity", id: "gemini-3-flash" })?.id).toBe(
+			"gemini-3-flash",
+		);
+		cfgExcludedModels.set(settings, excluded ? [source] : []);
+		registry.suppressSelector(source, until);
+		expect(registry.isSelectorSuppressed(source)).toBe(true);
+		expect(registry.isSelectorSuppressed(target)).toBe(false);
+		cfgExcludedModels.set(settings, []);
+		expect(registry.isSelectorSuppressed(source)).toBe(true);
+		registry.suppressSelector(target, until);
+		cfgExcludedModels.set(settings, [source]);
+		registry.clearSuppressedSelector(source);
+		expect(registry.isSelectorSuppressed(source)).toBe(false);
+		expect(registry.isSelectorSuppressed(target)).toBe(true);
 	});
 
 	it("keeps scope globs matching models outside a narrower exclusion", async () => {
@@ -662,6 +719,36 @@ try {
 		expect(registry.find("devin", "fusion-test")).toBeUndefined();
 
 		expect(await advertisedModels(session)).toEqual(catalog);
+	});
+
+	it.each([false, true])("resolves deferred prewalk without alias substitution (excluded=%s)", async excluded => {
+		const selector = "google-antigravity/gemini-3-flash";
+		auth.keys.setRuntime("google-antigravity", "fixture-key");
+		cfgExcludedModels.set(settings, excluded ? [selector] : []);
+		const warnings: string[] = [];
+		({ session } = await createAgentSession({
+			cwd: directory.path(),
+			agentDir: directory.path(),
+			modelRegistry: registry,
+			settings,
+			model: registry.find("devin", "regular-test"),
+			sessionManager: SessionManager.inMemory(),
+			deferredPrewalk: { target: selector, patterns: [selector] },
+			onPrewalkWarning: warning => warnings.push(warning),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: [],
+		}));
+		expect(session.getPrewalkState()?.target.id).toBe(excluded ? undefined : "gemini-3-flash");
+		expect(warnings.length > 0).toBe(excluded);
 	});
 
 	it("retains the complete catalog and available model list when exclusions are omitted or empty", async () => {

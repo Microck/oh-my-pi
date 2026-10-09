@@ -1124,10 +1124,12 @@ export async function resolvePrewalkTarget(
 	{
 		deferUnregistered = false,
 		beforeRefresh,
-	}: { deferUnregistered?: boolean; beforeRefresh?: () => Promise<void> } = {},
+		settings,
+	}: { deferUnregistered?: boolean; beforeRefresh?: () => Promise<void>; settings?: Settings } = {},
 ): Promise<{ prewalk?: Prewalk; warnings: string[]; deferred: boolean }> {
 	let refreshedProviders: Set<string> | undefined;
-	const resolveCandidate = (pattern: string) => resolveCliModel({ cliModel: pattern, modelRegistry, preferences });
+	const resolveCandidate = (pattern: string) =>
+		resolveCliModel({ cliModel: pattern, modelRegistry, preferences, settings });
 	let authenticated: ResolveCliModelResult | undefined;
 	let firstUnauthenticated: ResolveCliModelResult | undefined;
 	let lastResolution: ResolveCliModelResult | undefined;
@@ -3233,7 +3235,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				modelRegistry,
 				modelMatchPreferences,
 				disabledProviderIds(settings),
-				{ beforeRefresh: discoveryInFlight ? () => discoveryInFlight : undefined },
+				{ beforeRefresh: discoveryInFlight ? () => discoveryInFlight : undefined, settings },
 			);
 			prewalk = selection.prewalk;
 			deferredPrewalk = undefined;

@@ -3643,24 +3643,26 @@ export class ModelRegistry {
 		}
 	}
 
+	// Cooldown identity uses the full catalog, including models excluded during an active request.
+	#normalizeSuppressedSelector(selector: string): string {
+		return normalizeSuppressedSelector(
+			selector,
+			(provider, id) => this.getModelMetadata({ provider, id })?.id.toLowerCase() === id.toLowerCase(),
+		);
+	}
+
 	/**
 	 * Suppress a specific model selector (e.g., "provider/id") until a specific timestamp.
 	 */
 	suppressSelector(selector: string, untilMs: number): void {
-		this.#suppressedSelectors.set(
-			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
-			untilMs,
-		);
+		this.#suppressedSelectors.set(this.#normalizeSuppressedSelector(selector), untilMs);
 	}
 
 	/**
 	 * Check if a model selector is currently suppressed due to rate limits.
 	 */
 	isSelectorSuppressed(selector: string): boolean {
-		const normalizedSelector = normalizeSuppressedSelector(
-			selector,
-			(provider, id) => this.find(provider, id) !== undefined,
-		);
+		const normalizedSelector = this.#normalizeSuppressedSelector(selector);
 		const suppressedUntil = this.#suppressedSelectors.get(normalizedSelector);
 		if (!suppressedUntil) return false;
 		if (suppressedUntil <= Date.now()) {
@@ -3674,9 +3676,7 @@ export class ModelRegistry {
 	 * Clear the cooldown suppression for one selector after an explicit user selection.
 	 */
 	clearSuppressedSelector(selector: string): void {
-		this.#suppressedSelectors.delete(
-			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
-		);
+		this.#suppressedSelectors.delete(this.#normalizeSuppressedSelector(selector));
 	}
 
 	/**
