@@ -49,6 +49,12 @@ import type { SessionManager } from "./session-manager";
 import { cfgDefaultThinkingLevel, cfgProvidersFireworksTier } from "./settings";
 import { cfgDisabledProviders, cfgEnabledModels, cfgModelExclusionFilter } from "../config/model-settings";
 
+/** Enter a visible cycle at its boundary when the active model is no longer eligible. */
+function nextModelCycleIndex(currentIndex: number, length: number, direction: "forward" | "backward"): number {
+	if (currentIndex === -1) return direction === "forward" ? 0 : length - 1;
+	return direction === "forward" ? (currentIndex + 1) % length : (currentIndex - 1 + length) % length;
+}
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface ModelControlsHost {
 	agent: Agent;
@@ -419,8 +425,10 @@ export class ModelControls {
 		if (!cycle) return undefined;
 		if (cycle.models.length === 1 && modelsAreEqual(cycle.models[0].model, this.#model)) return undefined;
 
-		const step = direction === "backward" ? -1 : 1;
-		const next = cycle.models[(cycle.currentIndex + step + cycle.models.length) % cycle.models.length];
+		const currentIndex = modelsAreEqual(cycle.models[cycle.currentIndex].model, this.#model)
+			? cycle.currentIndex
+			: -1;
+		const next = cycle.models[nextModelCycleIndex(currentIndex, cycle.models.length, direction)];
 
 		await this.applyRoleModel(next);
 
@@ -457,15 +465,7 @@ export class ModelControls {
 		const currentModel = this.#model;
 		if (scopedModels.length === 1 && modelsAreEqual(scopedModels[0].model, currentModel)) return undefined;
 		const currentIndex = scopedModels.findIndex(sm => modelsAreEqual(sm.model, currentModel));
-		const len = scopedModels.length;
-		let nextIndex: number;
-		if (currentIndex === -1) {
-			// An excluded active model sits outside the visible cycle; enter at the nearest end.
-			nextIndex = direction === "forward" ? 0 : len - 1;
-		} else {
-			nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
-		}
-		const next = scopedModels[nextIndex];
+		const next = scopedModels[nextModelCycleIndex(currentIndex, scopedModels.length, direction)];
 
 		// Apply model
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
@@ -484,15 +484,12 @@ export class ModelControls {
 	async #cycleAvailableModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		const availableModels = this.#host.modelRegistry.getAvailable();
-		if (availableModels.length <= 1) return undefined;
+		if (availableModels.length === 0) return undefined;
 
 		const currentModel = this.#model;
-		let currentIndex = availableModels.findIndex(m => modelsAreEqual(m, currentModel));
-
-		if (currentIndex === -1) currentIndex = 0;
-		const len = availableModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
-		const nextModel = availableModels[nextIndex];
+		if (availableModels.length === 1 && modelsAreEqual(availableModels[0], currentModel)) return undefined;
+		const currentIndex = availableModels.findIndex(m => modelsAreEqual(m, currentModel));
+		const nextModel = availableModels[nextModelCycleIndex(currentIndex, availableModels.length, direction)];
 
 		const apiKey = await this.#host.modelRegistry.getApiKey(nextModel, this.#host.sessionId());
 		if (!apiKey) {

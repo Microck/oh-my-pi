@@ -2229,7 +2229,7 @@ export async function runRootCommand(
 			// Chat telemetry reports each request's provider-computed cost. A model
 			// without a known rate card reports an unavailable reason instead of $0.
 			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry, (providerId, modelId) => {
-				const model = modelRegistry.find(providerId, modelId);
+				const model = modelRegistry.getModelMetadata({ provider: providerId, id: modelId });
 				return model !== undefined && getModelPricingStatus(model) !== "unknown";
 			});
 		}

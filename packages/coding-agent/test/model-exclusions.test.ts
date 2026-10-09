@@ -5,8 +5,18 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { applyModelPreset, saveModelPreset } from "@oh-my-pi/pi-coding-agent/config/model-presets";
+import {
+	resolveCliModel,
+	resolveModelRoleValue,
+	resolveModelScope,
+	filterAvailableModelsByEnabledPatterns,
+} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { cfgEnabledModels, cfgExcludedModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import {
+	cfgDisabledProviders,
+	cfgEnabledModels,
+	cfgExcludedModels,
+} from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ProviderModelConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import {
@@ -24,6 +34,7 @@ import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-se
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createModelBrowserSource } from "@oh-my-pi/pi-coding-agent/modes/model-browser-source";
 import type { TUI } from "@oh-my-pi/pi-tui";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 import { buildSessionModelScope, SessionModelScopeCache } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { ModelHubComponent } from "@oh-my-pi/pi-tui/overlays/model-hub";
@@ -132,6 +143,93 @@ describe("excludedModels catalog policy", () => {
 		await writer.close();
 		return option.options.flatMap(entry => ("value" in entry ? [entry.value] : []));
 	}
+
+	it("rejects an excluded task override before creating a session with an owned registry", async () => {
+		// A fresh process isolates default registry paths and credentials from the test runner.
+		const program = `
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+const auth = await AuthStorage.create(":memory:");
+try {
+	const result = await runSubprocess({
+		cwd: process.env.PI_CODING_AGENT_DIR,
+		agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled", tools: [] },
+		task: "test", index: 0, id: "excluded-task-model", enableLsp: false,
+		modelOverride: ["fusion-test"], maxRuntimeMs: 5000,
+		authStorage: auth, settings: Settings.isolated({ excludedModels: ["*/*"] }),
+	});
+	process.stdout.write(JSON.stringify(result));
+} finally { auth.close(); }
+`;
+		const child = Bun.spawn([process.execPath, "--eval", program], {
+			cwd: path.resolve(import.meta.dir, "../../.."),
+			env: {
+				PATH: process.env.PATH,
+				PI_CODING_AGENT_DIR: directory.path(),
+				XDG_CONFIG_HOME: directory.path(),
+				XDG_DATA_HOME: directory.path(),
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [output, errors, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect({ exitCode, errors }).toEqual({ exitCode: 0, errors: "" });
+		const result: SingleResult = JSON.parse(output);
+		expect(result.exitCode).toBe(1);
+		expect(result.resolvedModelIdentity).toBeUndefined();
+		expect(result.error).toMatch(/No models available|No model selected|not found|not available/i);
+	}, 30_000);
+
+	it("refuses an excluded exact selector instead of recycling it as a variant alias", async () => {
+		const selector = "google-antigravity/gemini-3-flash";
+		auth.keys.setRuntime("google-antigravity", "fixture-key");
+		expect(resolveCliModel({ cliModel: selector, modelRegistry: registry, settings }).model?.id).toBe(
+			"gemini-3-flash",
+		);
+		cfgExcludedModels.set(settings, [selector]);
+		for (const suffix of ["", ":high"]) {
+			expect(
+				resolveCliModel({ cliModel: selector + suffix, modelRegistry: registry, settings }).model,
+			).toBeUndefined();
+			expect(
+				resolveCliModel({
+					cliProvider: "google-antigravity",
+					cliModel: `gemini-3-flash${suffix}`,
+					modelRegistry: registry,
+					settings,
+				}).model,
+			).toBeUndefined();
+			settings.setModelRole("slow", selector + suffix);
+			expect(resolveModelRoleValue("@slow", registry.getAvailable(), { settings }).model).toBeUndefined();
+			expect(await resolveModelScope([selector + suffix], registry, undefined, settings)).toEqual([]);
+			expect(filterAvailableModelsByEnabledPatterns(registry.getAvailable(), [selector + suffix], settings)).toEqual(
+				[],
+			);
+		}
+		expect(registry.find("google-antigravity", "gemini-3.5-flash")?.id).toBe("gemini-3.5-flash");
+		cfgExcludedModels.set(settings, []);
+		expect(resolveCliModel({ cliModel: selector, modelRegistry: registry, settings }).model?.id).toBe(
+			"gemini-3-flash",
+		);
+	});
+
+	it("keeps scope globs matching models outside a narrower exclusion", async () => {
+		cfgExcludedModels.set(settings, ["devin/fusion-?"]);
+		const expected = ["devin/fusion-test", "devin/fusion-test-v2"];
+		expect(
+			selectors(
+				(await resolveModelScope(["devin/fusion-*"], registry, undefined, settings)).map(entry => entry.model),
+			),
+		).toEqual(expected);
+		expect(
+			selectors(filterAvailableModelsByEnabledPatterns(registry.getAvailable(), ["devin/fusion-*"], settings)),
+		).toEqual(expected);
+	});
 
 	it("hides an exact provider-qualified ID from lazy lookup and the full catalog without hiding another provider's ID", () => {
 		cfgExcludedModels.set(settings, ["devin/fusion-test"]);
@@ -296,6 +394,45 @@ describe("excludedModels catalog policy", () => {
 		},
 	);
 
+	it.each([
+		["forward", 1],
+		["backward", 1],
+		["forward", 2],
+		["backward", 2],
+	] as const)("enters the unscoped catalog %s with %i eligible models after exclusion", async (direction, count) => {
+		const live = startSession();
+		live.setScopedModels([], false);
+		cfgDisabledProviders.set(
+			settings,
+			[...new Set(registry.getAll("all").map(model => model.provider))].filter(provider => provider !== "devin"),
+		);
+		cfgExcludedModels.set(settings, [
+			count === 1 ? "devin/{fusion-*,swe-*,regular-test}" : "devin/{fusion-test-v2,swe-*,regular-test}",
+		]);
+		const eligible = registry.getAvailable();
+		expect(eligible).toHaveLength(count);
+		const expected = direction === "forward" ? eligible[0] : eligible[eligible.length - 1];
+		expect((await live.cycleModel(direction))?.model.id).toBe(expected.id);
+		if (count === 1) expect(await live.cycleModel(direction)).toBeUndefined();
+	});
+
+	it.each(["forward", "backward"] as const)(
+		"enters eligible roles at the %s boundary after exclusion",
+		async direction => {
+			const live = startSession();
+			settings.setModelRole("default", "devin/regular-test");
+			settings.setModelRole("slow", "devin/regular-test-v2");
+			settings.setModelRole("smol", "devin/fusion-test");
+			cfgExcludedModels.set(settings, ["devin/regular-test"]);
+			expect((await live.cycleRoleModels(["slow", "smol"], direction))?.role).toBe(
+				direction === "forward" ? "slow" : "smol",
+			);
+			expect((await live.cycleRoleModels(["slow", "smol"], direction))?.role).toBe(
+				direction === "forward" ? "smol" : "slow",
+			);
+		},
+	);
+
 	it("refuses presets outside a configured-empty scope without writing roles", async () => {
 		settings.setModelRole("default", "devin/fusion-test");
 		saveModelPreset(settings, "outside");
@@ -324,7 +461,7 @@ describe("excludedModels catalog policy", () => {
 		expect(live.model?.id).toBe("regular-test");
 		live.setScopedModels([], false);
 		expect(live.getRoleModelCycle(["default", "slow"])?.models).toHaveLength(2);
-		expect((await live.cycleRoleModels(["default", "slow"]))?.model.id).toBe("fusion-test-v2");
+		expect((await live.cycleRoleModels(["default", "slow"]))?.model.id).toBe("fusion-test");
 	});
 
 	it.each(["forward", "backward"] as const)("cycles roles %s to the sole eligible scoped model", async direction => {
